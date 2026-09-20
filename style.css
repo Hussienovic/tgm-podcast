@@ -250,3 +250,6 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   .onair-lamp { background: var(--amber); }
 }
 :focus-visible { outline: 2px solid var(--sun); outline-offset: 2px; }
+
+.voice-opt .opt-group { margin-bottom: 4px; }
+.voice-opt .hint { margin: 6px 0 0; }

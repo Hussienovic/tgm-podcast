@@ -13,18 +13,21 @@ window.TGM_CONFIG = {
     { urls: "stun:stun2.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" },
 
-    // ---- TURN (OPTIONAL) ----
-    // Uncomment ONE block after you create a free account and get credentials.
+    // ---- TURN RELAY: needed for friends on strict networks (this fixed "far friend can't connect") ----
+    // 1) Make a free account at https://www.metered.ca/tools/openrelay/  (no credit card, 20 GB/month free)
+    // 2) In the dashboard open your TURN credentials and copy the username + credential
+    // 3) Delete the two "//" at the start of each line below and paste your values.
+    // Everyone who opens YOUR hosted link gets this automatically, so friends do nothing.
     //
-    // Metered.ca  (free tier, sign up at metered.ca -> TURN Server -> API keys)
     // {
     //   urls: [
-    //     "turn:YOUR_SUBDOMAIN.metered.live:80",
-    //     "turn:YOUR_SUBDOMAIN.metered.live:443",
-    //     "turns:YOUR_SUBDOMAIN.metered.live:443?transport=tcp"
+    //     "turn:standard.relay.metered.ca:80",
+    //     "turn:standard.relay.metered.ca:80?transport=tcp",
+    //     "turn:standard.relay.metered.ca:443",
+    //     "turns:standard.relay.metered.ca:443?transport=tcp"
     //   ],
-    //   username: "YOUR_USERNAME",
-    //   credential: "YOUR_CREDENTIAL"
+    //   username: "PASTE_YOUR_USERNAME",
+    //   credential: "PASTE_YOUR_CREDENTIAL"
     // },
   ],
 

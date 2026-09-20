@@ -38,7 +38,19 @@
   const genCode = () =>
     "TGM-" + Array.from({ length: 4 }, () => CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]).join("");
   const codeToPeerId = (code) => PEER_PREFIX + code.replace(/[^A-Z0-9]/gi, "").toUpperCase();
-  const randId = () => PEER_PREFIX + Math.random().toString(36).slice(2, 10);
+  const rnd = () => Math.random().toString(36).slice(2, 10);
+  // deviceId: stable for this tab/window.
+  // A person is identified by deviceId, so reconnecting REPLACES their old tile instead of adding one.
+  const DEVICE_ID = (() => {
+    try {
+      // sessionStorage = one id per tab/window: survives reloads and reconnects,
+      // but two tabs (or two devices) are never mistaken for the same person.
+      let d = sessionStorage.getItem("tgm_device");
+      if (!d) { d = rnd() + rnd(); sessionStorage.setItem("tgm_device", d); }
+      return d;
+    } catch (e) { return rnd() + rnd(); }
+  })();
+  const randId = () => PEER_PREFIX + rnd();
 
   function toast(msg, ms = 2600) {
     const t = $("toast");
@@ -53,6 +65,58 @@
   };
   const setErr = (m) => ($("lobbyError").textContent = m || "");
   const setConn = (m) => ($("connState").textContent = m);
+
+  // ---------- clean voice pipeline ----------
+  // mic -> highpass (kills rumble) -> RNNoise (AI noise removal) -> noise gate -> gentle compressor -> output
+  // If anything fails to load we fall back to the plain (browser-filtered) mic so the call never breaks.
+  const P = { ctx: null, node: null, dest: null, rnn: null, gate: null, rawStream: null, ready: false };
+
+  // voice mode: "clean" (AI noise removal, default) or "plain" (browser filters only, if voices ever sound clipped)
+  const getVoiceMode = () => { try { return localStorage.getItem("tgm_voice") || "clean"; } catch (e) { return "clean"; } };
+
+  async function buildCleanStream(rawStream) {
+    try {
+      if (getVoiceMode() === "plain") throw new Error("plain voice selected");
+      if (!window.TGMDenoise || !window.AudioWorkletNode) throw new Error("denoise not available");
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000, latencyHint: "interactive" });
+      await ctx.audioWorklet.addModule("audio/rnnoise-worklet.js");
+      await ctx.audioWorklet.addModule("audio/noisegate-worklet.js");
+      const wasm = await window.TGMDenoise.loadRnnoise({ url: "audio/rnnoise.wasm", simdUrl: "audio/rnnoise_simd.wasm" });
+
+      const src = ctx.createMediaStreamSource(rawStream);
+
+      const hp = ctx.createBiquadFilter();               // remove low rumble / desk thumps / AC hum
+      hp.type = "highpass"; hp.frequency.value = 90; hp.Q.value = 0.7;
+
+      const rnn = new window.TGMDenoise.RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary: wasm });
+
+      const gate = new window.TGMDenoise.NoiseGateWorkletNode(ctx, {
+        openThreshold: -60, closeThreshold: -68, holdMs: 400, maxChannels: 1,   // dB; very gentle: only cuts true silence, never soft speech
+      });
+
+      const comp = ctx.createDynamicsCompressor();       // even out loud/quiet speech
+      comp.threshold.value = -24; comp.knee.value = 24; comp.ratio.value = 3;
+      comp.attack.value = 0.005; comp.release.value = 0.2;
+
+      const dest = ctx.createMediaStreamDestination();
+      src.connect(hp); hp.connect(rnn); rnn.connect(gate); gate.connect(comp); comp.connect(dest);
+
+      if (ctx.state === "suspended") await ctx.resume();
+      Object.assign(P, { ctx, dest, rnn, gate, rawStream, ready: true });
+      return dest.stream;
+    } catch (e) {
+      console.warn("Clean-voice pipeline unavailable, using plain mic:", e);
+      P.ready = false;
+      return null;
+    }
+  }
+
+  function teardownCleanStream() {
+    try { P.rnn && P.rnn.destroy(); } catch (e) {}
+    try { P.rawStream && P.rawStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    try { P.ctx && P.ctx.close(); } catch (e) {}
+    Object.assign(P, { ctx: null, node: null, dest: null, rnn: null, gate: null, rawStream: null, ready: false });
+  }
 
   // ---------- media ----------
   async function getMic() {
@@ -167,18 +231,34 @@
   }
 
   // ---------- room: create / join ----------
+  // ICE servers = the ones in config.js, plus an optional per-device TURN saved from the app (for quick testing)
+  function getIceServers() {
+    const list = [...CFG.iceServers];
+    try {
+      const saved = JSON.parse(localStorage.getItem("tgm_turn") || "null");
+      if (saved && saved.urls && saved.username && saved.credential) list.push(saved);
+    } catch (e) {}
+    return list;
+  }
+  const hasTurn = () => getIceServers().some((s) => [].concat(s.urls).some((u) => /^turns?:/i.test(u)));
+
   function makePeer(id) {
-    const opts = { config: { iceServers: CFG.iceServers, sdpSemantics: "unified-plan" }, debug: 1 };
+    const opts = { config: { iceServers: getIceServers(), sdpSemantics: "unified-plan", iceCandidatePoolSize: 4 }, debug: 1 };
     if (CFG.peerServer && CFG.peerServer.host) Object.assign(opts, CFG.peerServer);
     return new Peer(id, opts);
   }
 
   async function startLocalMedia() {
+    let raw;
     try {
-      S.localStream = await getMic();
+      raw = await getMic();
     } catch (e) {
       throw new Error("Microphone blocked. Allow mic access in your browser or phone settings, then try again.");
     }
+    const clean = await buildCleanStream(raw);
+    // What we send to friends is the CLEANED track when available, otherwise the plain mic.
+    S.localStream = clean || raw;
+    S.cleanActive = !!clean;
   }
 
   async function hostRoom() {
@@ -245,7 +325,7 @@
         connected = true; clearTimeout(ct);
         enterRoom();
         registerConn(conn, S.hostPeerId, null);
-        conn.send({ t: "hello", name: S.name });
+        conn.send({ t: "hello", name: S.name, device: DEVICE_ID });
       });
       conn.on("error", () => setErr("Could not connect to the room."));
     });
@@ -315,19 +395,28 @@
     addSelfTile();
     startStats();
     if (S.isHost) toast("Room ready. Share the code " + S.roomCode);
+    if (!hasTurn()) setTimeout(() => toast("No relay set up: friends on strict networks may not connect. See README > TURN.", 6000), 3500);
   }
 
   // ---------- data channel protocol ----------
   // t: hello {name} | roster {list:[{id,name}]} | chat {text} | mute {muted} | share {on, streamId} | full
   function registerConn(conn, peerId, name) {
     let rec = S.peers.get(peerId) || {};
+    // If we already had a different connection to this exact peer, drop the old one quietly.
+    if (rec.conn && rec.conn !== conn) {
+      rec.conn._replaced = true;
+      try { rec.conn.close(); } catch (e) {}
+    }
     rec.conn = conn;
     if (name) rec.name = name;
     S.peers.set(peerId, rec);
 
-    conn.off && conn.off("data");
     conn.on("data", (m) => onData(peerId, m));
-    conn.on("close", () => onPeerGone(peerId));
+    conn.on("close", () => {
+      // a replaced connection closing must NOT remove the person: only the live one counts
+      if (conn._replaced || S.peers.get(peerId)?.conn !== conn) return;
+      onPeerGone(peerId);
+    });
     conn.on("error", () => {});
 
     // Host: tell newcomer who else is here, tell everyone else about newcomer
@@ -343,10 +432,15 @@
     // Call them with my mic
     if (!rec.call && shouldICall(peerId)) callPeer(peerId);
     ensureTile(peerId);
-    // introduce myself and share my current state (both sides do this)
-    conn.send({ t: "hello", name: S.name });
+    // introduce myself (with my stable deviceId so duplicates can be detected)
+    conn.send({ t: "hello", name: S.name, device: DEVICE_ID });
     conn.send({ t: "mute", muted: !S.micOn });
-    if (S.sharing && S.screenStream) conn.send({ t: "share", on: true, streamId: S.screenStream.id });
+    // LATE JOINERS: send them everything that is already live
+    if (S.sharing && S.screenStream) {
+      conn.send({ t: "share", on: true, streamId: S.screenStream.id });
+      if (shouldICall(peerId)) callScreen(peerId);
+      else conn.send({ t: "needscreen" });
+    }
   }
 
   // Deterministic: the peer with the smaller id places the call (avoids double calls)
@@ -357,13 +451,17 @@
     if (!rec || !m) return;
     switch (m.t) {
       case "hello":
-        rec.name = m.name; updateTileName(peerId); break;
+        rec.name = m.name;
+        if (m.device) {
+          rec.device = m.device;
+          dropDuplicatesOf(peerId, m.device);
+        }
+        updateTileName(peerId);
+        break;
       case "roster":
-        // connect to everyone already in the room
         m.list.forEach((p) => connectToMember(p.id, p.name));
         break;
       case "newpeer":
-        // host says someone new arrived; they will connect to us, nothing to do but expect them
         break;
       case "chat":
         addChat(rec.name || "Friend", m.text, false); break;
@@ -373,6 +471,10 @@
         rec.screenStreamId = m.on ? m.streamId : null;
         if (!m.on) removeShareTile(peerId);
         refreshLayout();
+        break;
+      case "needscreen":
+        // the other side is the caller for media but I am the one sharing: send it to them
+        if (S.sharing && S.screenStream) callScreen(peerId);
         break;
       case "recall":
         if (shouldICall(peerId)) {
@@ -386,12 +488,28 @@
     }
   }
 
+  // Same physical device showing up under a NEW peer id (reload, network switch): keep only the newest.
+  function dropDuplicatesOf(newPeerId, device) {
+    for (const [id, r] of [...S.peers]) {
+      if (id !== newPeerId && r.device === device) {
+        r.conn && (r.conn._replaced = true);
+        try { r.conn && r.conn.close(); } catch (e) {}
+        try { r.call && r.call.close(); } catch (e) {}
+        try { r.screenCall && r.screenCall.close(); } catch (e) {}
+        try { r.screenIn && r.screenIn.close(); } catch (e) {}
+        r.tile && r.tile.remove();
+        r.shareTile && r.shareTile.remove();
+        S.peers.delete(id);
+      }
+    }
+    refreshLayout();
+  }
+
   function connectToMember(id, name) {
     if (id === S.myId || S.peers.get(id)?.conn) return;
     const conn = S.peer.connect(id, { reliable: true, metadata: { name: S.name } });
     conn.on("open", () => {
       registerConn(conn, id, name);
-      conn.send({ t: "hello", name: S.name });
     });
   }
 
@@ -801,6 +919,7 @@
     });
     S.peers.clear();
     if (S.camTrack) S.camTrack.stop();
+    teardownCleanStream();
     cleanupPeer();
     clearInterval(S.statsTimer);
     $("grid").innerHTML = "";
@@ -815,6 +934,15 @@
   // ---------- UI wiring ----------
   window.addEventListener("DOMContentLoaded", () => {
     $("nameInput").value = localStorage.getItem("tgm_name") || "";
+    // voice mode toggle (saved on this device)
+    const applyVoiceUi = () => {
+      const m = getVoiceMode();
+      $("voiceGroup").querySelectorAll(".opt").forEach((b) => b.classList.toggle("sel", b.dataset.voice === m));
+    };
+    $("voiceGroup").querySelectorAll(".opt").forEach((b) => {
+      b.onclick = () => { try { localStorage.setItem("tgm_voice", b.dataset.voice); } catch (e) {} applyVoiceUi(); };
+    });
+    applyVoiceUi();
     $("hostBtn").onclick = hostRoom;
     $("joinBtn").onclick = joinRoom;
     $("codeInput").addEventListener("input", (e) => {

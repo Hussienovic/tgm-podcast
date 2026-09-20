@@ -28,6 +28,15 @@
         <input id="nameInput" type="text" maxlength="20" placeholder="e.g. Hocine" autocomplete="off">
       </label>
 
+      <label class="field voice-opt">
+        <span>Voice</span>
+        <div class="opt-group" id="voiceGroup">
+          <button type="button" data-voice="clean" class="opt sel">Clean (AI noise removal)</button>
+          <button type="button" data-voice="plain" class="opt">Plain</button>
+        </div>
+        <small class="hint">If voices ever sound cut off or robotic, choose Plain.</small>
+      </label>
+
       <button id="hostBtn" class="btn primary">Host a room</button>
 
       <div class="divider"><span>or join a friend</span></div>
@@ -129,6 +138,7 @@
 <div id="toast" class="toast hidden"></div>
 
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="audio/denoise.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body>
