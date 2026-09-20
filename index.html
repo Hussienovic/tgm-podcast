@@ -951,8 +951,9 @@ async function setupChain(raw) {
   S.chain = { src, hp, gate, gateProbe, comp, outProbe };
   startNoiseGate(gate, gateProbe);
   startSelfMeter(outProbe);
-  S.micTrack = (S.sendDest.stream && S.sendDest.stream.getAudioTracks && S.sendDest.stream.getAudioTracks()[0]) || null;
-  S.localStream = new MediaStream([S.micTrack]);
+  S.rawMicStream = raw;
+  S.micTrack = (raw && raw.getAudioTracks && raw.getAudioTracks()[0]) || null;
+  S.localStream = new MediaStream(S.micTrack ? [S.micTrack] : []);
 }
 
 function rmsFrom(analyser) {
@@ -964,7 +965,8 @@ function rmsFrom(analyser) {
 }
 
 function startNoiseGate(gainNode, probe) {
-  setInterval(() => {
+  if (S.gateInt) clearInterval(S.gateInt);
+  S.gateInt = setInterval(() => {
     if (!S.audio || S.audio.state !== "running" || !S.myId) return;
     const r = rmsFrom(probe);
     const t = S.audio.currentTime;
@@ -975,7 +977,8 @@ function startNoiseGate(gainNode, probe) {
 }
 
 function startSelfMeter(probe) {
-  setInterval(() => {
+  if (S.selfInt) clearInterval(S.selfInt);
+  S.selfInt = setInterval(() => {
     if (!S.audio || S.audio.state !== "running" || !S.myId) return;
     const me = S.links.get(S.myId);
     if (!me) return;
@@ -1124,6 +1127,7 @@ function startRemoteMeter(link) {
 
 async function toggleMic() {
   S.micOff = !S.micOff;
+  if (S.micTrack) S.micTrack.enabled = !S.micOff;
   $("#btnMic").classList.toggle("on", !S.micOff);
   $("#btnMic").classList.toggle("warn", S.micOff);
   const me = S.links.get(S.myId);
@@ -2018,6 +2022,8 @@ function finalLeave() {
   if (S.hbInt) { clearInterval(S.hbInt); S.hbInt = null; }
   if (S.statInt) { clearInterval(S.statInt); S.statInt = null; }
   if (S.timerInt) { clearInterval(S.timerInt); S.timerInt = null; }
+  if (S.gateInt) { clearInterval(S.gateInt); S.gateInt = null; }
+  if (S.selfInt) { clearInterval(S.selfInt); S.selfInt = null; }
   if (S.audio) { try { S.audio.close(); } catch(e) {} }
   S.audio = null;
   if (S.outEl) { try { S.outEl.pause(); } catch(e) {} try { S.outEl.srcObject = null; } catch(e) {} try { S.outEl.remove(); } catch(e) {} }
@@ -2032,6 +2038,9 @@ function finalLeave() {
   if (S.micTrack) { S.micTrack.stop(); S.micTrack = null; }
   if (S.videoTrack) { try { S.videoTrack.stop(); } catch(e) {} S.videoTrack = null; }
   S.localStream = null;
+  S.rawMicStream = null;
+  S.myId = null;
+  S.rawMicReady = false;
   $("#btnMic").classList.remove("on", "warn");
   $("#btnCam").classList.remove("on");
   $("#btnShare").classList.remove("on");
