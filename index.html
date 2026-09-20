@@ -880,10 +880,14 @@ async function ensureAudioContext() {
   S.soundBus = ctx.createGain();
   S.soundBus.gain.value = 0.9;
   S.soundBus.connect(S.masterGain);
+  S.outLevel = ctx.createAnalyser();
+  S.outLevel.fftSize = 512;
+  S.masterGain.connect(S.outLevel);
   S.recDest = ctx.createMediaStreamDestination();
   S.recordGain = ctx.createGain();
   S.recordGain.connect(S.recDest);
   S.sendDest = ctx.createMediaStreamDestination();
+  ctx.onstatechange = () => { if (ctx.state === "suspended") unlockAudio(); };
   unlockAudio();
   return ctx;
 }
@@ -1112,6 +1116,8 @@ function closeVideoCalls() {
 function pcOf(c) { return c.peerConnection || c._pc || (c.media && c.media.peerConnection) || null; }
 
 function startRemoteMeter(link) {
+  if (link._rt) clearInterval(link._rt);
+  if (link._t2) clearInterval(link._t2);
   link._rt = setInterval(() => {
     if (link.analyser && !link.muted && !link.speakingMotion) {
       const v = rmsFrom(link.analyser);
@@ -1828,6 +1834,11 @@ function removeLocalLink(id) {
 }
 
 function ensureMesh() {
+  unlockAudio();
+  for (const l of S.links.values()) {
+    if (l.id === S.myId || !l.lastStream || l.analyser) continue;
+    try { attachRemoteAudio(l, l.lastStream); } catch(e) {}
+  }
   for (const p of S.roster) {
     if (p.id === S.myId) continue;
     const entry = link(p.id);
@@ -2042,6 +2053,7 @@ function finalLeave() {
   S.sendDest = null;
   S.recDest = null;
   S.masterGain = null;
+  S.outLevel = null;
   S.recordGain = null;
   S.soundBus = null;
   if (S.micTrack) { S.micTrack.stop(); S.micTrack = null; }
@@ -2141,7 +2153,10 @@ function collectStats() {
   const net = [];
   if (navigator.connection && navigator.connection.effectiveType) net.push(navigator.connection.effectiveType.toUpperCase());
   if (navigator.connection) net.push((navigator.connection.downlink * 8).toFixed(0) + " Mbps");
-  $("#statsNet").textContent = net.length ? "Network: " + net.join(" ").toUpperCase() : "";
+  const actx = S.audio ? S.audio.state : "none";
+  const self = S.chain && S.chain.outProbe ? rmsFrom(S.chain.outProbe).toFixed(3) : "–";
+  const outl = S.outLevel ? rmsFrom(S.outLevel).toFixed(3) : "–";
+  $("#statsNet").textContent = "ctx " + actx + " | self-rms " + self + " | out-rms " + outl + (net.length ? " | " + net.join(" ").toUpperCase() : "");
   const proms = [];
   S.links.forEach(l => {
     const rms = l.analyser ? rmsFrom(l.analyser) : null;
