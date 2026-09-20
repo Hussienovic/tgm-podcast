@@ -1,0 +1,9 @@
+{
+  "name": "TGM Podcast",
+  "short_name": "TGM Podcast",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#0A0A08",
+  "theme_color": "#0A0A08",
+  "icons": [{ "src": "icon.png", "sizes": "512x512", "type": "image/png" }]
+}
