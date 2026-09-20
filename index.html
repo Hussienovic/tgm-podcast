@@ -511,7 +511,11 @@
         <thead><tr><th>Peer</th><th>Audio &#8593;</th><th>Video &#8593;</th><th>Loss</th><th>RTT</th></tr></thead>
         <tbody id="statsBody"><tr><td colspan="5" style="text-align:center;color:var(--muted)">Collecting…</td></tr></tbody>
       </table>
-      <div style="margin-top:14px;font-size:12.5px;color:var(--muted)" id="statsNet"></div>
+      <div style="margin-top:10px">
+        <button class="ctrl-btn" id="btnTone" style="padding:8px 14px">Test tone 440 Hz</button>
+        <span style="font-size:12.5px;color:var(--muted);margin-left:10px">should hear a short beep on your speakers</span>
+      </div>
+      <div style="margin-top:10px;font-size:12.5px;color:var(--muted)" id="statsNet"></div>
     </div>
   </div>
 </div>
@@ -1833,8 +1837,50 @@ function removeLocalLink(id) {
   addSys(who + " left the room");
 }
 
+function playTestTone() {
+  if (!S.audio || S.audio.state !== "running") { toast("Audio engine not running yet", 2000); return; }
+  unlockAudio();
+  const t = S.audio.currentTime;
+  try {
+    const o = S.audio.createOscillator();
+    const g = S.audio.createGain();
+    o.type = "sine";
+    o.frequency.value = 440;
+    o.connect(g);
+    g.connect(S.soundBus);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.5, t + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+    o.start(t);
+    o.stop(t + 0.55);
+    o.onended = () => { try { o.disconnect(); g.disconnect(); } catch(e){} };
+  } catch(e) {
+    toast("Test tone failed: " + e.message, 3000);
+  }
+}
+
+function checkSilent() {
+  for (const l of S.links.values()) {
+    if (l.id === S.myId || !l.media || !l.sawAudioKbps) continue;
+    if (l.sawAudioKbps < 5) continue;
+    const rms = l.analyser ? rmsFrom(l.analyser) : 0;
+    if (rms >= 0.004) { l.blasts = 0; continue; }
+    if ((l.blasts || 0) >= 4) continue;
+    if (Date.now() - (l.lastBlast || 0) < 3000) continue;
+    l.lastBlast = Date.now();
+    l.blasts = (l.blasts || 0) + 1;
+    try {
+      if (l.audioSrc) { try { l.audioSrc.disconnect(); } catch(e2) {} }
+      l.gain = null; l.analyser = null; l.audioSrc = null; l.audioSrcStream = null;
+      attachRemoteAudio(l, l.lastStream);
+    } catch(e) {}
+    if (l.blasts >= 4) toast("Audio from " + (l.name || "peer") + " arrives but can't reach playback — rebuilding", 3500);
+  }
+}
+
 function ensureMesh() {
   unlockAudio();
+  checkSilent();
   for (const l of S.links.values()) {
     if (l.id === S.myId || !l.lastStream || l.analyser) continue;
     try { attachRemoteAudio(l, l.lastStream); } catch(e) {}
@@ -2166,6 +2212,7 @@ function collectStats() {
     let label = l.name || l.id;
     label += ' <span class="' + (st === "OK" ? "gold" : st === "no-call" ? "bad" : "warn") + '">[' + st + "]</span>";
     label += " <span class='ok'>rms " + (rms == null ? "–" : rms.toFixed(3)) + "</span>";
+    if (l.audioSrcStream) label += " <span class='gold'>src " + l.audioSrcStream.getAudioTracks().length + "</span>";
     if (l.mediaRetries) label += " <span class='bad'>retry " + l.mediaRetries + "</span>";
     const pc = l.media ? pcOf(l.media) : null;
     if (!pc || !pc.getStats) { rows.push([label, 0, 0, 0, null]); return; }
@@ -2185,6 +2232,7 @@ function collectStats() {
       const aKbps = dt > 0 ? (br.a - prev.bytesA) * 8 / 1000 / dt : 0;
       const vKbps = dt > 0 ? (br.v - prev.bytesV) * 8 / 1000 / dt : 0;
       S.prevStats[key] = { bytesA: br.a, bytesV: br.v, ts: Date.now() };
+      l.sawAudioKbps = aKbps;
       const lossPct = lpk > 0 ? loss / lpk * 100 : 0;
       rows.push([label, aKbps, vKbps, lossPct, rtt]);
     }).catch(() => rows.push([label, 0, 0, 0, null])));
@@ -2247,6 +2295,7 @@ $("#boardClose").addEventListener("click", () => $("#boardModal").classList.remo
 $("#boardModal").addEventListener("click", e => { if (e.target === $("#boardModal")) $("#boardModal").classList.remove("open"); });
 
 $("#btnStats").addEventListener("click", () => $("#statsModal").classList.add("open"));
+  $("#btnTone").addEventListener("click", () => { unlockAudio(); playTestTone(); });
 $("#btnStatsH").addEventListener("click", () => $("#statsModal").classList.add("open"));
 $("#statsClose").addEventListener("click", () => $("#statsModal").classList.remove("open"));
 $("#statsModal").addEventListener("click", e => { if (e.target === $("#statsModal")) $("#statsModal").classList.remove("open"); });
