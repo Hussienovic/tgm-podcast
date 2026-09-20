@@ -451,6 +451,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
         Share
       </button>
+      <button class="ctrl-btn" id="btnSpeaker" title="Loudspeaker / earpiece" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4Z"/><path d="M16 9a4 4 0 0 1 0 6M19 5.5a8.5 8.5 0 0 1 0 13"/></svg>
+        Speaker
+      </button>
       <button class="ctrl-btn" id="btnBoard" title="Soundboard">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="11" rx="2"/><path d="M8 13v4M16 13v4M5 20h14M12 17v3"/></svg>
         Board
@@ -575,6 +579,10 @@ const S = {
   chain: null,
   sendDest: null,
   recDest: null,
+  outDest: null,
+  outEl: null,
+  usePhoneOutput: false,
+  speakerOn: true,
   recordGain: null,
   masterGain: null,
   soundBus: null,
@@ -687,7 +695,7 @@ function upsertTile(id, name, isHost) {
       vol.addEventListener("input", () => {
         S.vol[id] = Number(vol.value);
         const entry = S.links.get(id);
-        if (entry && entry.gain) entry.gain.gain.setTargetAtTime(Number(vol.value) / 100, S.audio.currentTime, 0.02);
+        if (entry && entry.gain && S.audio) entry.gain.gain.setTargetAtTime(Number(vol.value) / 100, S.audio.currentTime, 0.02);
       });
     }
     const entry = S.links.get(id);
@@ -853,9 +861,22 @@ async function ensureAudioContext() {
   }
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   S.audio = ctx;
+  S.speakerOn = true;
   S.masterGain = ctx.createGain();
   S.masterGain.gain.value = 0.95;
-  S.masterGain.connect(ctx.destination);
+  S.usePhoneOutput = ("ontouchstart" in window) || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  if (S.usePhoneOutput) {
+    S.outDest = ctx.createMediaStreamDestination();
+    S.masterGain.connect(S.outDest);
+    S.outEl = document.createElement("audio");
+    S.outEl.srcObject = S.outDest.stream;
+    S.outEl.setAttribute("playsinline", "");
+    S.outEl.style.display = "none";
+    document.body.appendChild(S.outEl);
+    S.outEl.play().catch(() => {});
+  } else {
+    S.masterGain.connect(ctx.destination);
+  }
   S.soundBus = ctx.createGain();
   S.soundBus.gain.value = 0.9;
   S.soundBus.connect(S.masterGain);
@@ -873,6 +894,29 @@ function unlockAudio() {
     const r = S.audio.resume();
     if (r && r.catch) r.catch(() => {});
   }
+  if (S.outEl) S.outEl.play().catch(() => {});
+}
+
+async function applySpeaker() {
+  const el = S.outEl;
+  if (!el || !el.setSinkId || !navigator.mediaDevices) return;
+  let devs = [];
+  try { devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audiooutput"); } catch(e) { return; }
+  const pick = S.speakerOn
+    ? (devs.find(d => d.label && /speaker|media|music|headphone|wired|bluetooth/i.test(d.label) && !/call|communic|earpiece/i.test(d.label))
+       || devs.find(d => d.deviceId !== "default") || null)
+    : (devs.find(d => /call|communic|earpiece/i.test(d.label || ""))
+       || devs.find(d => d.deviceId === "default") || devs[0] || null);
+  const id = pick ? pick.deviceId : "";
+  try { await el.setSinkId(id); } catch(e) {}
+}
+
+function toggleSpeaker() {
+  S.speakerOn = !S.speakerOn;
+  const b = $("#btnSpeaker");
+  if (b) b.classList.toggle("on", S.speakerOn);
+  applySpeaker();
+  toast(S.speakerOn ? "Speakerphone on" : "Using earpiece", 1400);
 }
 document.addEventListener("pointerdown", () => unlockAudio(), { capture: true, passive: true });
 document.addEventListener("keydown", () => unlockAudio(), { capture: true });
@@ -921,21 +965,23 @@ function rmsFrom(analyser) {
 
 function startNoiseGate(gainNode, probe) {
   setInterval(() => {
+    if (!S.audio || S.audio.state !== "running" || !S.myId) return;
     const r = rmsFrom(probe);
     const t = S.audio.currentTime;
     if (S.micOff) { gainNode.gain.setTargetAtTime(0.0001, t, 0.01); return; }
-    if (r < 0.012) gainNode.gain.setTargetAtTime(0.0001, t, 0.06);
-    else gainNode.gain.setTargetAtTime(1, t, 0.03);
+    if (r < 0.004) gainNode.gain.setTargetAtTime(0.3, t, 0.05);
+    else gainNode.gain.setTargetAtTime(1, t, 0.02);
   }, 90);
 }
 
 function startSelfMeter(probe) {
   setInterval(() => {
+    if (!S.audio || S.audio.state !== "running" || !S.myId) return;
     const me = S.links.get(S.myId);
     if (!me) return;
     const v = rmsFrom(probe);
-    setSpeaking(me, v > 0.02);
-    if (v > 0.02) tickHeartbeatUI();
+    setSpeaking(me, v > 0.012);
+    if (v > 0.012) tickHeartbeatUI();
   }, 120);
 }
 
@@ -1064,10 +1110,9 @@ function pcOf(c) { return c.peerConnection || c._pc || (c.media && c.media.peerC
 
 function startRemoteMeter(link) {
   link._rt = setInterval(() => {
-    if (link.speakingMotion) { link.speakingMotion = false; setSpeaking(link, false); }
-    if (link.analyser && !link.muted) {
+    if (link.analyser && !link.muted && !link.speakingMotion) {
       const v = rmsFrom(link.analyser);
-      if (v > 0.03) { link.speakingMotion = true; setSpeaking(link, true); tickHeartbeatUI(); }
+      if (v > 0.02) { link.speakingMotion = true; setSpeaking(link, true); tickHeartbeatUI(); }
     }
   }, 110);
   link._t2 = setInterval(() => {
@@ -1097,7 +1142,7 @@ async function toggleCam() {
   }
   if (!S.audio || S.audio.state !== "running") { toast("Click unlock audio first"); return; }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24 } } });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 20 } } });
     setVideoTrack(stream.getVideoTracks()[0]);
     S.camOn = true;
     t.classList.add("on");
@@ -1198,9 +1243,9 @@ function updateSelfTile() {
   const t = $("#tile-" + S.myId);
   if (!t) return;
   const v = t.querySelector("video");
-  const has = S.videoTrack != null;
+  const has = S.videoTrack != null && !S.sharing;
   if (has) {
-    v.srcObject = new MediaStream([S.videoTrack]);
+    if (v.srcObject !== S.localStream || v.style.display === "none") v.srcObject = S.localStream;
     v.style.display = "block";
     bindVideoFullscreen(v);
     t.querySelector(".avaso").style.display = "none";
@@ -1846,6 +1891,9 @@ async function startCall(role) {
       await setupChain(raw);
       if (!S.micTrack) throw new Error("no audio track from mic");
       S.rawMicReady = true;
+      if (S.audio && S.audio.state === "suspended") {
+        try { await Promise.race([S.audio.resume(), new Promise(r => setTimeout(r, 2500))]); } catch(e) {}
+      }
     }
     clearTimeout(watchdog);
   } catch(e) {
@@ -1854,6 +1902,10 @@ async function startCall(role) {
     toast("Audio setup failed: " + (e.message || e), 4000);
     return;
   }
+
+  applySpeaker();
+  const spb = $("#btnSpeaker");
+  if (spb) { spb.style.display = ""; spb.classList.toggle("on", S.speakerOn); }
 
   setConn("Connecting…", true);
   if (role === "host") {
@@ -1968,6 +2020,9 @@ function finalLeave() {
   if (S.timerInt) { clearInterval(S.timerInt); S.timerInt = null; }
   if (S.audio) { try { S.audio.close(); } catch(e) {} }
   S.audio = null;
+  if (S.outEl) { try { S.outEl.pause(); } catch(e) {} try { S.outEl.srcObject = null; } catch(e) {} try { S.outEl.remove(); } catch(e) {} }
+  S.outEl = null;
+  S.outDest = null;
   S.chain = null;
   S.sendDest = null;
   S.recDest = null;
@@ -1980,6 +2035,8 @@ function finalLeave() {
   $("#btnMic").classList.remove("on", "warn");
   $("#btnCam").classList.remove("on");
   $("#btnShare").classList.remove("on");
+  $("#btnSpeaker").classList.remove("on");
+  $("#btnSpeaker").style.display = "none";
   $("#btnRecord").classList.remove("on");
   $("#btnRecordH").classList.remove("on");
   $("#chatMsgs").innerHTML = "";
@@ -2142,6 +2199,7 @@ $("#codeInput").addEventListener("keydown", e => { if (e.key === "Enter") startC
 $("#btnMic").addEventListener("click", toggleMic);
 $("#btnCam").addEventListener("click", toggleCam);
 $("#btnShare").addEventListener("click", toggleShare);
+  $("#btnSpeaker").addEventListener("click", toggleSpeaker);
   window.addEventListener("resize", () => { if (S.mode === "call") setTileStates(); });
 $("#btnChat").addEventListener("click", () => $("#chatPanel").classList.toggle("open"));
 $("#btnBoard").addEventListener("click", () => { buildBoard(); $("#boardModal").classList.add("open"); });
