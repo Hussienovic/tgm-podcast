@@ -1626,12 +1626,12 @@ function handleIncomingCall(call) {
   call.answer(S.localStream);
   if (videoOnly) {
     entry.videoCallIn = call;
-    call.on("stream", stream => attachRemoteVideoOnly(entry, stream));
+    call.on("stream", stream => { entry.mediaGotStream = true; attachRemoteVideoOnly(entry, stream); });
     return;
   }
   if (!entry.media) entry.media = call;
   entry.callIn = call;
-  call.on("stream", stream => attachRemoteAudio(entry, stream));
+  call.on("stream", stream => { entry.mediaGotStream = true; attachRemoteAudio(entry, stream); });
 }
 
 function handleData(rid, data) {
@@ -1840,11 +1840,20 @@ function tryMedia(entry, id, isHostPeer) {
   let shouldCall = false;
   if (!S.isHost) shouldCall = (isHostPeer || S.myId < id);
   if (!shouldCall) return;
+  if ((entry.mediaRetries || 0) >= 3) return;
   const mc = S.peer.call(id, S.localStream, { metadata: { n: S.myName } });
   entry.media = mc;
-  mc.on("stream", stream => attachRemoteAudio(entry, stream));
-  mc.on("close", () => { entry.media = null; });
-  mc.on("error", () => { entry.media = null; });
+  entry.mediaGotStream = false;
+  entry.mediaTimer = setTimeout(() => {
+    entry.mediaTimer = null;
+    if (entry.mediaGotStream || entry.media !== mc) return;
+    entry.mediaRetries = (entry.mediaRetries || 0) + 1;
+    try { mc.close(); } catch(e) {}
+    entry.media = null;
+  }, 10000);
+  mc.on("stream", stream => { entry.mediaGotStream = true; if (entry.mediaTimer) { clearTimeout(entry.mediaTimer); entry.mediaTimer = null; } attachRemoteAudio(entry, stream); });
+  mc.on("close", () => { if (entry.mediaTimer) { clearTimeout(entry.mediaTimer); entry.mediaTimer = null; } if (entry.media === mc) entry.media = null; });
+  mc.on("error", () => { if (entry.mediaTimer) { clearTimeout(entry.mediaTimer); entry.mediaTimer = null; } if (entry.media === mc) entry.media = null; });
 }
 
 function onPeerOpen() {
@@ -2135,9 +2144,16 @@ function collectStats() {
   $("#statsNet").textContent = net.length ? "Network: " + net.join(" ").toUpperCase() : "";
   const proms = [];
   S.links.forEach(l => {
-    if (!l.media) return;
-    const pc = pcOf(l.media);
-    if (!pc || !pc.getStats) return;
+    const rms = l.analyser ? rmsFrom(l.analyser) : null;
+    const hasIn = l.mediaGotStream || !!l.audioSrc || !!l.videoStream;
+    let st = l.media ? (hasIn ? "OK" : "waiting") : "no-call";
+    if (!l.media && (l._rt || l.callIn)) st = "recv";
+    let label = l.name || l.id;
+    label += ' <span class="' + (st === "OK" ? "gold" : st === "no-call" ? "bad" : "warn") + '">[' + st + "]</span>";
+    label += " <span class='ok'>rms " + (rms == null ? "–" : rms.toFixed(3)) + "</span>";
+    if (l.mediaRetries) label += " <span class='bad'>retry " + l.mediaRetries + "</span>";
+    const pc = l.media ? pcOf(l.media) : null;
+    if (!pc || !pc.getStats) { rows.push([label, 0, 0, 0, null]); return; }
     proms.push(pc.getStats().then(report => {
       let br = { a: 0, v: 0 }, loss = 0, lpk = 0, rtt = null;
       report.forEach(r => {
@@ -2155,8 +2171,8 @@ function collectStats() {
       const vKbps = dt > 0 ? (br.v - prev.bytesV) * 8 / 1000 / dt : 0;
       S.prevStats[key] = { bytesA: br.a, bytesV: br.v, ts: Date.now() };
       const lossPct = lpk > 0 ? loss / lpk * 100 : 0;
-      rows.push([l.name || l.id, aKbps, vKbps, lossPct, rtt]);
-    }).catch(() => {}));
+      rows.push([label, aKbps, vKbps, lossPct, rtt]);
+    }).catch(() => rows.push([label, 0, 0, 0, null])));
   });
   Promise.all(proms).then(() => {
     const tb = $("#statsBody");
