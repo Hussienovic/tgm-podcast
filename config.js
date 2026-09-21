@@ -19,16 +19,13 @@ window.TGM_CONFIG = {
     // 3) Delete the two "//" at the start of each line below and paste your values.
     // Everyone who opens YOUR hosted link gets this automatically, so friends do nothing.
     //
-    // {
-    //   urls: [
-    //     "turn:standard.relay.metered.ca:80",
-    //     "turn:standard.relay.metered.ca:80?transport=tcp",
-    //     "turn:standard.relay.metered.ca:443",
-    //     "turns:standard.relay.metered.ca:443?transport=tcp"
-    //   ],
-    //   username: "PASTE_YOUR_USERNAME",
-    //   credential: "PASTE_YOUR_CREDENTIAL"
-    // },
+    {
+    urls: [
+      "turn:free.expressturn.com:3478"
+    ],
+    username: "000000002105311056",
+    credential: "BMzS40ihdsSjwah3QcVGfwVsL08="
+    },
   ],
 
   // ---- PeerJS signaling broker (free public one by default) ----
