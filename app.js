@@ -41,6 +41,7 @@
     avatarCache: new Map(), // avatarId -> object URL (per-session cache)
     avatarParts: new Map(), // receives: avatarId -> { parts, total, got, timer }
     avatarReqs: new Set(),  // avatarIds I have asked for
+    avatarTries: new Map(), // avatarId -> request retry count
   };
 
   // ---------- helpers ----------
@@ -140,11 +141,16 @@
         S.myAvatarId = p.avatarId || null;
       }
     } catch (e) { S.myAvatarId = p.avatarId || null; }
+    // a saved avatarId with no stored blob is stale: drop it so we don't advertise a broken avatar
+    if (S.myAvatarId && !S.myAvatarBlob) {
+      S.myAvatarId = null;
+      try { localStorage.setItem("tgm_profile", JSON.stringify({ ...p, avatarId: null })); } catch (e) {}
+    }
     renderLobbyAvatar();
   }
 
   // ---------- avatar distribution (chunked, so big GIFs reach everyone) ----------
-  const AVATAR_CHUNK = 48 * 1024; // bytes per data-channel message
+  const AVATAR_CHUNK = 12 * 1024; // bytes per message: keeps each packet far under every browser's data-channel size cap
   function idb() {
     return new Promise((res, rej) => {
       const r = indexedDB.open("tgm", 1);
@@ -189,6 +195,8 @@
       const part = bytes.subarray(i * AVATAR_CHUNK, Math.min(bytes.length, (i + 1) * AVATAR_CHUNK));
       let bin = "";
       for (let j = 0; j < part.length; j += 8192) bin += String.fromCharCode.apply(null, part.subarray(j, j + 8192));
+      // yield every few chunks so a huge GIF never blocks the UI thread
+      if (i % 4 === 0) await new Promise((r) => setTimeout(r, 0));
       conn.send({ t: "avatar", id, part: i, total, type, d: btoa(bin) });
     }
   }
@@ -203,7 +211,7 @@
     let acc = S.avatarParts.get(m.id);
     if (!acc) {
       acc = { parts: new Array(m.total || 1), total: m.total || 1, type: m.type || "image/*", got: 0 };
-      acc.timer = setTimeout(() => { S.avatarParts.delete(m.id); S.avatarReqs.delete(m.id); }, 30000);
+      acc.timer = setTimeout(() => { S.avatarParts.delete(m.id); S.avatarReqs.delete(m.id); S.avatarTries.delete(m.id); }, 30000);
       S.avatarParts.set(m.id, acc);
     }
     if (m.part < acc.total && acc.parts[m.part] === undefined) { acc.parts[m.part] = m.d; acc.got++; }
@@ -219,12 +227,14 @@
     }
   }
   function finishAvatar(id, blob) {
+    S.avatarTries.delete(id);
     const url = URL.createObjectURL(blob);
     S.avatarCache.set(id, url);
     if (S.myAvatarId === id) { S.myAvatarUrl = url; applyAvatar(S.selfTile, url); }
     for (const [pid, r] of S.peers) if (r.avatarId === id) applyAvatar(r.tile, url);
   }
-  // ask for / apply an avatar by id, with a per-session cache so nobody re-downloads it
+  // ask for / apply an avatar by id, with a per-session cache so nobody re-downloads it.
+  // Retries a few times in case a request or a chunk is lost along the way.
   function ensureAvatarFor(peerId, id) {
     const rec = S.peers.get(peerId);
     if (!rec) return;
@@ -232,9 +242,25 @@
     if (!id) { applyAvatar(rec.tile, null); return; }
     if (S.avatarCache.has(id)) { applyAvatar(rec.tile, S.avatarCache.get(id)); return; }
     applyAvatar(rec.tile, null);
-    if (S.avatarReqs.has(id)) return;
-    S.avatarReqs.add(id);
-    if (rec.conn && rec.conn.open) rec.conn.send({ t: "avatar-req", id });
+    if (!S.avatarReqs.has(id)) {
+      S.avatarReqs.add(id);
+      askAvatar(id);
+    } else {
+      maybeAskAgain(id);
+    }
+  }
+  function askAvatar(id) {
+    for (const [pid, r] of S.peers) {
+      if (r.avatarId === id && r.conn && r.conn.open) r.conn.send({ t: "avatar-req", id });
+    }
+    setTimeout(() => maybeAskAgain(id), 8000);
+  }
+  function maybeAskAgain(id) {
+    if (S.avatarCache.has(id)) return;
+    const tries = (S.avatarTries.get(id) || 0) + 1;
+    if (tries > 4) { S.avatarReqs.delete(id); S.avatarTries.delete(id); return; }
+    S.avatarTries.set(id, tries);
+    askAvatar(id);
   }
 
   // ---------- tile avatars ----------
