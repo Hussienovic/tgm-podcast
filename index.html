@@ -23,13 +23,24 @@
     </div>
 
     <div class="lobby-card">
-      <label class="field">
-        <span>Your name</span>
-        <input id="nameInput" type="text" maxlength="20" placeholder="e.g. Hocine" autocomplete="off">
-      </label>
-      <div class="profile-row">
-        <button id="profileBtn" class="btn small">Profile & theme</button>
+      <div class="prof-area">
+      <button id="lobbyAvatar" class="avatar big img-btn" type="button" title="Change profile picture">
+        <img id="lobbyAvatarImg" alt="" hidden>
+        <span id="lobbyAvatarLetter">?</span>
+      </button>
+      <div class="prof-side">
+        <label class="field">
+          <span>Your name</span>
+          <input id="nameInput" type="text" maxlength="20" placeholder="e.g. Hocine" autocomplete="off">
+        </label>
+        <div class="avatar-row">
+          <button id="avatarBtn" class="btn small">Change photo</button>
+          <button id="avatarClear" class="btn small hidden">Remove</button>
+          <input id="profFile" type="file" accept="image/*" hidden>
+        </div>
+        <small class="hint">Animated GIFs work, up to 8 MB.</small>
       </div>
+    </div>
 
       <label class="field voice-opt">
         <span>Voice</span>
@@ -153,32 +164,7 @@
     <button id="boardClose" class="btn small">Close</button>
   </div>
 
-  <!-- Profile card (first run + edit) -->
-  <div id="profileModal" class="profile-overlay hidden">
-    <div class="profile-card">
-      <h3>Your profile</h3>
-      <label class="field">
-        <span>Your name</span>
-        <input id="profName" type="text" maxlength="20" placeholder="e.g. Hocine" autocomplete="off">
-      </label>
-      <div class="field">
-        <span>Profile picture (GIFs allowed)</span>
-        <div class="avatar-row">
-          <div class="avatar big" id="profPreview"><img id="profImg" alt="" hidden><span id="profLetter">?</span></div>
-          <label class="btn small">Choose image<input id="profFile" type="file" accept="image/*" hidden></label>
-          <button id="profClear" class="btn small">Remove</button>
-        </div>
-        <small class="hint">Animated GIFs work. Keep it under ~2.5 MB so rooms stay fast.</small>
-      </div>
-      <div class="field">
-        <span>Theme</span>
-        <div class="swatches" id="themeSwatches"></div>
-      </div>
-      <button id="profSave" class="btn primary">Save profile</button>
-      <button id="profSkip" class="btn small" style="width:100%;margin-top:8px">Skip for now</button>
-    </div>
-  </div>
-</main>
+  </main>
 
 <div id="toast" class="toast hidden"></div>
 

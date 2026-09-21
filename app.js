@@ -33,7 +33,14 @@
     selfShareTile: null,   // local preview while sharing the screen
     camFace: "user",       // "user" (front) or "environment" (back)
     boardCtx: null,        // AudioContext for the soundboard
-    profile: null,         // { name, avatar (dataURL), theme }
+    profile: null,         // { name, avatarId }
+    myAvatarBlob: null,    // my avatar File/Blob (stored in IndexedDB)
+    myAvatarId: null,
+    myAvatarType: null,
+    myAvatarUrl: null,     // object URL for rendering
+    avatarCache: new Map(), // avatarId -> object URL (per-session cache)
+    avatarParts: new Map(), // receives: avatarId -> { parts, total, got, timer }
+    avatarReqs: new Set(),  // avatarIds I have asked for
   };
 
   // ---------- helpers ----------
@@ -70,73 +77,164 @@
   const setErr = (m) => ($("lobbyError").textContent = m || "");
   const setConn = (m) => ($("connState").textContent = m);
 
-  // ---------- profile & theme ----------
-  const THEMES = {
-    amber: { label: "Crescent", vars: { "--amber": "#FFB800", "--sun": "#FFE24A",
-      "--grad": "linear-gradient(135deg,#FFE24A 0%,#FFB800 55%,#FF8A00 100%)",
-      "--grad-soft": "linear-gradient(135deg,rgba(255,226,74,.16),rgba(255,138,0,.06))" } },
-    emerald: { label: "Emerald", vars: { "--amber": "#34D399", "--sun": "#6EE7B7",
-      "--grad": "linear-gradient(135deg,#6EE7B7 0%,#34D399 55%,#0F9D6E 100%)",
-      "--grad-soft": "linear-gradient(135deg,rgba(110,231,183,.16),rgba(15,157,110,.06))" } },
-    ocean: { label: "Ocean", vars: { "--amber": "#38BDF8", "--sun": "#7DD3FC",
-      "--grad": "linear-gradient(135deg,#7DD3FC 0%,#38BDF8 55%,#0284C7 100%)",
-      "--grad-soft": "linear-gradient(135deg,rgba(125,211,252,.16),rgba(2,132,199,.06))" } },
-    violet: { label: "Violet", vars: { "--amber": "#A78BFA", "--sun": "#C4B5FD",
-      "--grad": "linear-gradient(135deg,#C4B5FD 0%,#A78BFA 55%,#7C3AED 100%)",
-      "--grad-soft": "linear-gradient(135deg,rgba(196,181,253,.16),rgba(124,58,237,.06))" } },
-    rose: { label: "Rose", vars: { "--amber": "#FB7185", "--sun": "#FDA4AF",
-      "--grad": "linear-gradient(135deg,#FDA4AF 0%,#FB7185 55%,#BE123C 100%)",
-      "--grad-soft": "linear-gradient(135deg,rgba(253,164,175,.16),rgba(190,18,60,.06))" } },
-  };
-  function applyTheme(key) {
-    const t = THEMES[key] || THEMES.amber;
-    const r = document.documentElement.style;
-    Object.entries(t.vars).forEach(([k, v]) => r.setProperty(k, v));
-  }
+  // ---------- profile (name + avatar, edited in the lobby) ----------
   function loadProfile() {
     try { S.profile = JSON.parse(localStorage.getItem("tgm_profile") || "null"); } catch (e) { S.profile = null; }
     return S.profile;
   }
-  function saveProfile() {
-    const name = ($("profName").value || "").trim().slice(0, 20) || "Guest";
-    const avatar = PEND.avatar || null;
-    const theme = PEND.theme || "amber";
-    S.profile = { name, avatar, theme };
-    try { localStorage.setItem("tgm_profile", JSON.stringify(S.profile)); }
-    catch (e) { S.profile.avatar = null; toast("Avatar too large; the rest was saved."); }
-    try { localStorage.setItem("tgm_name", name); } catch (e) {}
-    $("nameInput").value = name;
-    applyTheme(theme);
-    $("profileModal").classList.add("hidden");
-    if (S.selfTile) {
-      S.name = name; // adopt the profile name for the rest of this visit
-      S.selfTile.querySelector(".nm").textContent = name + " (you)";
-      S.selfTile.querySelector(".avatar-letter").textContent = (name[0] || "?").toUpperCase();
-      applyAvatar(S.selfTile, avatar);
+  function persistProfile() {
+    const name = ($("nameInput").value || "").trim().slice(0, 20) || "Guest";
+    S.profile = { name, avatarId: S.myAvatarId };
+    try { localStorage.setItem("tgm_profile", JSON.stringify(S.profile)); localStorage.setItem("tgm_name", name); } catch (e) {}
+    renderLobbyAvatar();
+  }
+  function renderLobbyAvatar() {
+    const img = $("lobbyAvatarImg");
+    if (S.myAvatarUrl) {
+      img.src = S.myAvatarUrl; img.hidden = false;
+      $("lobbyAvatarLetter").hidden = true;
+      $("avatarClear").classList.remove("hidden");
+    } else {
+      img.hidden = true; img.removeAttribute("src");
+      $("lobbyAvatarLetter").hidden = false;
+      $("lobbyAvatarLetter").textContent = ($("nameInput").value || "?").charAt(0).toUpperCase();
+      $("avatarClear").classList.add("hidden");
     }
-    broadcast({ t: "hello", name: S.name, device: DEVICE_ID, avatar: avatarForWire() });
-    toast("Profile saved.");
   }
-  // dataURLs this small are cheap to beam to the whole room; bigger ones stay local-only
-  const avatarForWire = () => { const a = S.profile && S.profile.avatar; return a && a.length < 200000 ? a : null; };
-  const PEND = { avatar: null, theme: "amber" };
-  function openProfile() {
+  function setOwnAvatar(file) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return toast("Please pick an image file.");
+    if (file.size > 8 * 1024 * 1024) return toast("Image too large (max 8 MB).");
+    const id = rnd() + rnd();
+    S.myAvatarBlob = file;
+    S.myAvatarId = id;
+    S.myAvatarType = file.type || "image/*";
+    S.myAvatarUrl = URL.createObjectURL(file);
+    S.avatarCache.set(id, S.myAvatarUrl);
+    idbSet("my_avatar", { id, type: S.myAvatarType, blob: file }).catch(() => toast("Could not store avatar on this device."));
+    persistProfile();
+    if (S.selfTile) applyAvatar(S.selfTile, S.myAvatarUrl);
+    broadcast({ t: "hello", name: S.name, device: DEVICE_ID, avatarId: S.myAvatarId });
+    toast("Avatar set.");
+  }
+  function clearOwnAvatar() {
+    S.myAvatarBlob = null; S.myAvatarId = null; S.myAvatarType = null; S.myAvatarUrl = null;
+    idbDel("my_avatar").catch(() => {});
+    persistProfile();
+    if (S.selfTile) applyAvatar(S.selfTile, null);
+    broadcast({ t: "hello", name: S.name, device: DEVICE_ID, avatarId: null });
+  }
+
+  // my avatar lives as a Blob in IndexedDB (so multi-MB animated GIFs are fine) and shows via an object URL
+  async function bootProfile() {
+    loadProfile();
     const p = S.profile || {};
-    $("profName").value = p.name || $("nameInput").value || "";
-    PEND.avatar = p.avatar || null;
-    PEND.theme = p.theme || "amber";
-    renderProfileAvatar();
-    renderThemePicker();
-    $("profileModal").classList.remove("hidden");
-    $("profName").focus();
+    $("nameInput").value = p.name || localStorage.getItem("tgm_name") || "";
+    try {
+      const st = await idbGet("my_avatar");
+      if (st && st.id && p.avatarId === st.id && st.blob) {
+        S.myAvatarBlob = st.blob; S.myAvatarId = st.id; S.myAvatarType = st.type || "image/*";
+        S.myAvatarUrl = URL.createObjectURL(st.blob);
+        S.avatarCache.set(st.id, S.myAvatarUrl);
+      } else {
+        S.myAvatarId = p.avatarId || null;
+      }
+    } catch (e) { S.myAvatarId = p.avatarId || null; }
+    renderLobbyAvatar();
   }
-  function renderProfileAvatar() {
-    const img = $("profImg");
-    if (PEND.avatar) { img.src = PEND.avatar; img.hidden = false; $("profLetter").hidden = true; }
-    else { img.hidden = true; img.removeAttribute("src"); $("profLetter").hidden = false; $("profLetter").textContent = ($("profName").value || "?").charAt(0).toUpperCase(); }
+
+  // ---------- avatar distribution (chunked, so big GIFs reach everyone) ----------
+  const AVATAR_CHUNK = 48 * 1024; // bytes per data-channel message
+  function idb() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open("tgm", 1);
+      r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains("kv")) r.result.createObjectStore("kv"); };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
   }
-  function renderThemePicker() {
-    $("themeSwatches").querySelectorAll(".swatch").forEach((b) => b.classList.toggle("sel", b.dataset.theme === PEND.theme));
+  function idbGet(key) {
+    return idb().then((db) => new Promise((res, rej) => {
+      const g = db.transaction("kv", "readonly").objectStore("kv").get(key);
+      g.onsuccess = () => res(g.result);
+      g.onerror = () => rej(g.error);
+    }));
+  }
+  function idbSet(key, value) {
+    return idb().then((db) => new Promise((res, rej) => {
+      const s = db.transaction("kv", "readwrite").objectStore("kv").put(value, key);
+      s.onsuccess = () => res();
+      s.onerror = () => rej(s.error);
+    }));
+  }
+  function idbDel(key) {
+    return idb().then((db) => new Promise((res, rej) => {
+      const d = db.transaction("kv", "readwrite").objectStore("kv").delete(key);
+      d.onsuccess = () => res();
+      d.onerror = () => rej(d.error);
+    }));
+  }
+  const readArrayBuffer = (blob) =>
+    blob.arrayBuffer ? blob.arrayBuffer() : new Promise((res, rej) => {
+      const rd = new FileReader();
+      rd.onload = () => res(rd.result);
+      rd.onerror = () => rej(rd.error);
+      rd.readAsArrayBuffer(blob);
+    });
+  async function sendAvatarTo(conn, id, type, blob) {
+    const buf = await readArrayBuffer(blob);
+    const bytes = new Uint8Array(buf);
+    const total = Math.ceil(bytes.length / AVATAR_CHUNK);
+    for (let i = 0; i < total; i++) {
+      const part = bytes.subarray(i * AVATAR_CHUNK, Math.min(bytes.length, (i + 1) * AVATAR_CHUNK));
+      let bin = "";
+      for (let j = 0; j < part.length; j += 8192) bin += String.fromCharCode.apply(null, part.subarray(j, j + 8192));
+      conn.send({ t: "avatar", id, part: i, total, type, d: btoa(bin) });
+    }
+  }
+  function handleAvatarReq(peerId, m) {
+    if (!m.id || m.id !== S.myAvatarId || !S.myAvatarBlob) return;
+    const rec = S.peers.get(peerId);
+    if (rec && rec.conn && rec.conn.open) {
+      sendAvatarTo(rec.conn, m.id, S.myAvatarType || "image/*", S.myAvatarBlob).catch(() => {});
+    }
+  }
+  function onAvatarChunk(m) {
+    let acc = S.avatarParts.get(m.id);
+    if (!acc) {
+      acc = { parts: new Array(m.total || 1), total: m.total || 1, type: m.type || "image/*", got: 0 };
+      acc.timer = setTimeout(() => { S.avatarParts.delete(m.id); S.avatarReqs.delete(m.id); }, 30000);
+      S.avatarParts.set(m.id, acc);
+    }
+    if (m.part < acc.total && acc.parts[m.part] === undefined) { acc.parts[m.part] = m.d; acc.got++; }
+    if (acc.got === acc.total) {
+      clearTimeout(acc.timer);
+      S.avatarParts.delete(m.id);
+      try {
+        const joined = acc.parts.join("");
+        const u8 = new Uint8Array(joined.length);
+        for (let i = 0; i < joined.length; i++) u8[i] = joined.charCodeAt(i);
+        finishAvatar(m.id, new Blob([u8], { type: acc.type }));
+      } catch (e) { S.avatarReqs.delete(m.id); }
+    }
+  }
+  function finishAvatar(id, blob) {
+    const url = URL.createObjectURL(blob);
+    S.avatarCache.set(id, url);
+    if (S.myAvatarId === id) { S.myAvatarUrl = url; applyAvatar(S.selfTile, url); }
+    for (const [pid, r] of S.peers) if (r.avatarId === id) applyAvatar(r.tile, url);
+  }
+  // ask for / apply an avatar by id, with a per-session cache so nobody re-downloads it
+  function ensureAvatarFor(peerId, id) {
+    const rec = S.peers.get(peerId);
+    if (!rec) return;
+    rec.avatarId = id || null;
+    if (!id) { applyAvatar(rec.tile, null); return; }
+    if (S.avatarCache.has(id)) { applyAvatar(rec.tile, S.avatarCache.get(id)); return; }
+    applyAvatar(rec.tile, null);
+    if (S.avatarReqs.has(id)) return;
+    S.avatarReqs.add(id);
+    if (rec.conn && rec.conn.open) rec.conn.send({ t: "avatar-req", id });
   }
 
   // ---------- tile avatars ----------
@@ -148,11 +246,6 @@
     if (src) { img.src = src; img.hidden = false; letter.hidden = true; }
     else { img.hidden = true; img.removeAttribute("src"); letter.hidden = false; }
   }
-  function setTileAvatar(peerId, src) {
-    const tile = peerId === "self" ? S.selfTile : (S.peers.get(peerId) || {}).tile;
-    applyAvatar(tile, src);
-  }
-
   // ---------- soundboard ----------
   const SOUNDS = [
     { k: "airhorn", label: "Airhorn", art: "📯" },
@@ -470,7 +563,7 @@
         connected = true; clearTimeout(ct);
         enterRoom();
         registerConn(conn, S.hostPeerId, null);
-        conn.send({ t: "hello", name: S.name, device: DEVICE_ID, avatar: avatarForWire() });
+        conn.send({ t: "hello", name: S.name, device: DEVICE_ID, avatarId: S.myAvatarId });
       });
       conn.on("error", () => setErr("Could not connect to the room."));
     });
@@ -568,17 +661,17 @@
     if (S.isHost && S.peers.size) {
       const roster = [...S.peers.entries()]
         .filter(([id]) => id !== peerId)
-        .map(([id, r]) => ({ id, name: r.name || "Friend", avatar: r.avatar || null }));
+        .map(([id, r]) => ({ id, name: r.name || "Friend", avatarId: r.avatarId || null }));
       conn.send({ t: "roster", list: roster });
       S.peers.forEach((r, id) => {
-        if (id !== peerId && r.conn && r.conn.open) r.conn.send({ t: "newpeer", id: peerId, name: rec.name || "Friend", avatar: rec.avatar || null });
+        if (id !== peerId && r.conn && r.conn.open) r.conn.send({ t: "newpeer", id: peerId, name: rec.name || "Friend", avatarId: rec.avatarId || null });
       });
     }
     // Call them with my mic
     if (!rec.call && shouldICall(peerId)) callPeer(peerId);
     ensureTile(peerId);
     // introduce myself (with my stable deviceId so duplicates can be detected)
-    conn.send({ t: "hello", name: S.name, device: DEVICE_ID, avatar: avatarForWire() });
+    conn.send({ t: "hello", name: S.name, device: DEVICE_ID, avatarId: S.myAvatarId });
     conn.send({ t: "mute", muted: !S.micOn });
     // LATE JOINERS: send them everything that is already live
     if (S.sharing && S.screenStream) {
@@ -597,22 +690,22 @@
     switch (m.t) {
       case "hello":
         rec.name = m.name;
-        rec.avatar = m.avatar || null;
         if (m.device) {
           rec.device = m.device;
           dropDuplicatesOf(peerId, m.device);
         }
         updateTileName(peerId);
+        ensureAvatarFor(peerId, m.avatarId || null);
         break;
       case "roster":
-        m.list.forEach((p) => connectToMember(p.id, p.name, p.avatar));
+        m.list.forEach((p) => connectToMember(p.id, p.name, p.avatarId));
         break;
       case "newpeer": {
         const nr = S.peers.get(m.id);
         if (nr) {
           if (m.name) nr.name = m.name;
-          nr.avatar = m.avatar || null;
           updateTileName(m.id);
+          ensureAvatarFor(m.id, m.avatarId || null);
         }
         break;
       }
@@ -638,6 +731,10 @@
         break;
       case "sound":
         playBoard(m.k); break;
+      case "avatar-req":
+        handleAvatarReq(peerId, m); break;
+      case "avatar":
+        onAvatarChunk(m); break;
       case "full":
         toast("Room is full (max " + CFG.maxPeople + ")."); leave(); break;
     }
@@ -660,13 +757,12 @@
     refreshLayout();
   }
 
-  function connectToMember(id, name, avatar) {
+  function connectToMember(id, name, avatarId) {
     if (id === S.myId || S.peers.get(id)?.conn) return;
     const conn = S.peer.connect(id, { reliable: true, metadata: { name: S.name } });
     conn.on("open", () => {
       registerConn(conn, id, name);
-      const r = S.peers.get(id);
-      if (r && avatar && !r.avatar) { r.avatar = avatar; setTileAvatar(id, avatar); }
+      ensureAvatarFor(id, avatarId || null);
     });
   }
 
@@ -795,7 +891,7 @@
     const v = S.selfTile.querySelector("video");
     v.srcObject = S.localStream;
     v.muted = true;
-    applyAvatar(S.selfTile, S.profile && S.profile.avatar);
+    applyAvatar(S.selfTile, S.myAvatarUrl);
     refreshSelfView();
     setupSpeakingDetector("self", S.localStream);
     refreshLayout();
@@ -826,7 +922,7 @@
     if (!rec || !rec.tile) return;
     rec.tile.querySelector(".nm").textContent = rec.name;
     rec.tile.querySelector(".avatar-letter").textContent = (rec.name[0] || "?").toUpperCase();
-    applyAvatar(rec.tile, rec.avatar || null);
+    applyAvatar(rec.tile, rec.avatarId ? S.avatarCache.get(rec.avatarId) || null : null);
   }
   function setTileMuted(peerId, m) { const r = S.peers.get(peerId); r && r.tile && r.tile.classList.toggle("is-muted", !!m); }
   function setTileReconnecting(peerId, on) { const r = S.peers.get(peerId); r && r.tile && r.tile.classList.toggle("reconnecting", on); }
@@ -1154,14 +1250,8 @@
 
   // ---------- UI wiring ----------
   window.addEventListener("DOMContentLoaded", () => {
-    // name prefilled: saved profile wins, else the plain saved name
-    loadProfile();
-    if (S.profile) {
-      applyTheme(S.profile.theme);
-      $("nameInput").value = S.profile.name || $("nameInput").value;
-    } else {
-      $("nameInput").value = localStorage.getItem("tgm_name") || "";
-    }
+    // name prefilled (and avatar blob restored) from the saved profile
+    bootProfile();
     // voice mode toggle (saved on this device)
     const applyVoiceUi = () => {
       const m = getVoiceMode();
@@ -1222,34 +1312,12 @@
     pick("modeGroup", "mode", (v) => (S.shareQuality.mode = v));
     $("brRange").oninput = (e) => { S.shareQuality.mbps = +e.target.value; $("brLabel").textContent = e.target.value; };
 
-    // profile / theme
-    $("profileBtn").onclick = openProfile;
-    $("profSave").onclick = saveProfile;
-    $("profSkip").onclick = () => $("profileModal").classList.add("hidden");
-    $("profClear").onclick = () => { PEND.avatar = null; renderProfileAvatar(); };
-    $("profName").addEventListener("input", renderProfileAvatar);
-    $("profFile").addEventListener("change", (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
-      if (!f.type.startsWith("image/")) return toast("Please pick an image file.");
-      if (f.size > 2.6 * 1024 * 1024) return toast("Image too large (max ~2.5 MB).");
-      const rd = new FileReader();
-      rd.onload = () => { PEND.avatar = rd.result; renderProfileAvatar(); };
-      rd.readAsDataURL(f);
-      e.target.value = "";
-    });
-    $("themeSwatches").innerHTML = Object.entries(THEMES)
-      .map(([k, t]) => `<button type="button" class="swatch" data-theme="${k}" title="${t.label}" style="background:${t.vars["--amber"]}"></button>`)
-      .join("");
-    $("themeSwatches").addEventListener("click", (e) => {
-      const b = e.target.closest(".swatch");
-      if (!b) return;
-      PEND.theme = b.dataset.theme;
-      applyTheme(PEND.theme);
-      renderThemePicker();
-    });
-    // first visit: ask for a profile right away
-    if (!S.profile) openProfile();
+    // profile: name + avatar, edited live in the lobby
+    $("nameInput").addEventListener("input", persistProfile);
+    $("lobbyAvatar").onclick = () => $("profFile").click();
+    $("avatarBtn").onclick = () => $("profFile").click();
+    $("avatarClear").onclick = clearOwnAvatar;
+    $("profFile").addEventListener("change", (e) => { setOwnAvatar(e.target.files && e.target.files[0]); e.target.value = ""; });
 
     // soundboard
     $("boardBtn").onclick = () => $("boardSheet").classList.toggle("hidden");
