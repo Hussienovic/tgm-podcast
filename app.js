@@ -116,6 +116,15 @@
     persistProfile();
     if (S.selfTile) applyAvatar(S.selfTile, S.myAvatarUrl);
     broadcast({ t: "hello", name: S.name, device: DEVICE_ID, avatarId: S.myAvatarId });
+    // already-connected friends get the new photo immediately
+    S.peers.forEach((rec, pid) => {
+      if (!rec.conn || !rec.conn.open) return;
+      rec.conn.pushedAvatars = rec.conn.pushedAvatars || new Set();
+      if (rec.conn.pushedAvatars.has(id)) return;
+      rec.conn.pushedAvatars.add(id);
+      const bid = id; const b = file;
+      sendAvatarTo(rec.conn, bid, S.myAvatarType || "image/*", b).catch(() => rec.conn.pushedAvatars && rec.conn.pushedAvatars.delete(bid));
+    });
     toast("Avatar set.");
   }
   function clearOwnAvatar() {
@@ -150,7 +159,7 @@
   }
 
   // ---------- avatar distribution (chunked, so big GIFs reach everyone) ----------
-  const AVATAR_CHUNK = 12 * 1024; // bytes per message: keeps each packet far under every browser's data-channel size cap
+  const AVATAR_CHUNK = 6 * 1024; // bytes per message; base64≈8KB < PeerJS/Safari 16KB maxMessageSize, so peerjs never re-chunks it
   function idb() {
     return new Promise((res, rej) => {
       const r = indexedDB.open("tgm", 1);
@@ -203,8 +212,15 @@
   function handleAvatarReq(peerId, m) {
     if (!m.id || m.id !== S.myAvatarId || !S.myAvatarBlob) return;
     const rec = S.peers.get(peerId);
-    if (rec && rec.conn && rec.conn.open) {
-      sendAvatarTo(rec.conn, m.id, S.myAvatarType || "image/*", S.myAvatarBlob).catch(() => {});
+    const liveConn = rec && rec.conn;
+    // already being pushed through this live connection; the request is just a duplicate
+    if (liveConn && liveConn.pushedAvatars && liveConn.pushedAvatars.has(m.id)) return;
+    if (liveConn && liveConn.open) {
+      const id = m.id;
+      const blob = S.myAvatarBlob;
+      sendAvatarTo(liveConn, id, S.myAvatarType || "image/*", blob)
+        .then(() => { liveConn.pushedAvatars = liveConn.pushedAvatars || new Set(); liveConn.pushedAvatars.add(id); })
+        .catch(() => {}); // retries (avatar-req) will pick it up later
     }
   }
   function onAvatarChunk(m) {
@@ -699,6 +715,16 @@
     // introduce myself (with my stable deviceId so duplicates can be detected)
     conn.send({ t: "hello", name: S.name, device: DEVICE_ID, avatarId: S.myAvatarId });
     conn.send({ t: "mute", muted: !S.micOn });
+    // eagerly hand my profile photo to the other side: no request round-trip needed
+    if (S.myAvatarBlob && S.myAvatarId) {
+      const id = S.myAvatarId;
+      const blob = S.myAvatarBlob;
+      conn.pushedAvatars = conn.pushedAvatars || new Set();
+      if (!conn.pushedAvatars.has(id)) {
+        conn.pushedAvatars.add(id);
+        sendAvatarTo(conn, id, S.myAvatarType || "image/*", blob).catch(() => conn.pushedAvatars && conn.pushedAvatars.delete(id));
+      }
+    }
     // LATE JOINERS: send them everything that is already live
     if (S.sharing && S.screenStream) {
       conn.send({ t: "share", on: true, streamId: S.screenStream.id });
@@ -1210,6 +1236,9 @@
     for (const [id, rec] of S.peers) {
       const pcs = [rec.call, rec.screenCall].filter(Boolean).map((c) => c.peerConnection).filter(Boolean);
       let block = `<div class="row"><h4>${escapeHtml(rec.name || "Friend")}</h4>`;
+      block += rec.avatarId
+        ? (S.avatarCache.has(rec.avatarId) ? '<span class="good">photo ✓</span> ' : `photo… (${S.avatarTries.get(rec.avatarId) || 0}/4) `)
+        : "";
       if (!pcs.length) block += "no media link yet";
       for (const pc of pcs) {
         try {
