@@ -27,6 +27,9 @@
         <span>Your name</span>
         <input id="nameInput" type="text" maxlength="20" placeholder="e.g. Hocine" autocomplete="off">
       </label>
+      <div class="profile-row">
+        <button id="profileBtn" class="btn small">Profile & theme</button>
+      </div>
 
       <label class="field voice-opt">
         <span>Voice</span>
@@ -87,14 +90,22 @@
       <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>
       <span>Mic</span>
     </button>
-    <button id="camBtn" class="dock-btn" aria-label="Turn camera on">
-      <svg viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3"/></svg>
-      <span>Camera</span>
-    </button>
-    <button id="shareBtn" class="dock-btn" aria-label="Share screen">
-      <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-      <span>Share</span>
-    </button>
+<button id="camBtn" class="dock-btn" aria-label="Turn camera on">
+          <svg viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3"/></svg>
+          <span>Camera</span>
+        </button>
+        <button id="flipBtn" class="dock-btn" aria-label="Switch front/back camera" style="display:none">
+          <svg viewBox="0 0 24 24"><path d="M20 8h-3l-2-3h-6l-2 3H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2Z"/><path d="m4 10 1-1 1 1M9 2l-1 3"/><circle cx="12" cy="14" r="3"/></svg>
+          <span>Flip</span>
+        </button>
+<button id="shareBtn" class="dock-btn" aria-label="Share screen">
+          <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          <span>Share</span>
+        </button>
+        <button id="boardBtn" class="dock-btn" aria-label="Soundboard">
+          <svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="11" rx="2"/><path d="M8 13v4M16 13v4M5 20h14M12 17v3"/></svg>
+          <span>Sounds</span>
+        </button>
     <button id="qualityBtn" class="dock-btn" aria-label="Screen quality">
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg>
       <span>Quality</span>
@@ -132,6 +143,40 @@
     </label>
     <p class="hint">Applies the next time you start sharing. Lower it if viewers see stutter.</p>
     <button id="qualityClose" class="btn small">Done</button>
+  </div>
+
+  <!-- Soundboard sheet -->
+  <div id="boardSheet" class="sheet hidden" role="dialog" aria-label="Soundboard">
+    <h3>Soundboard</h3>
+    <div class="board-grid" id="boardGrid"></div>
+    <p class="hint">Played for the whole room. Keep the clicks reasonable!</p>
+    <button id="boardClose" class="btn small">Close</button>
+  </div>
+
+  <!-- Profile card (first run + edit) -->
+  <div id="profileModal" class="profile-overlay hidden">
+    <div class="profile-card">
+      <h3>Your profile</h3>
+      <label class="field">
+        <span>Your name</span>
+        <input id="profName" type="text" maxlength="20" placeholder="e.g. Hocine" autocomplete="off">
+      </label>
+      <div class="field">
+        <span>Profile picture (GIFs allowed)</span>
+        <div class="avatar-row">
+          <div class="avatar big" id="profPreview"><img id="profImg" alt="" hidden><span id="profLetter">?</span></div>
+          <label class="btn small">Choose image<input id="profFile" type="file" accept="image/*" hidden></label>
+          <button id="profClear" class="btn small">Remove</button>
+        </div>
+        <small class="hint">Animated GIFs work. Keep it under ~2.5 MB so rooms stay fast.</small>
+      </div>
+      <div class="field">
+        <span>Theme</span>
+        <div class="swatches" id="themeSwatches"></div>
+      </div>
+      <button id="profSave" class="btn primary">Save profile</button>
+      <button id="profSkip" class="btn small" style="width:100%;margin-top:8px">Skip for now</button>
+    </div>
   </div>
 </main>
 
